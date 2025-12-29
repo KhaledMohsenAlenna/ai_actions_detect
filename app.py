@@ -17,7 +17,7 @@ CLASSES_LIST = ['ApplyEyeMakeup', 'ApplyLipstick', 'Archery', 'BabyCrawling', 'B
 
 # اسم الملف الجديد (Numpy)
 MODEL_PATH = 'raw_weights.npz'
-
+MODEL_PATH_2 = 'cnn_weights.npz'
 # ==========================================
 # 2. Model Architecture
 # ==========================================
@@ -35,22 +35,56 @@ def create_model():
     
     return model
 
+from tensorflow.keras.layers import Conv3D, MaxPooling3D, Flatten, Dense, GlobalAveragePooling3D
+
+from tensorflow.keras.layers import Conv3D, MaxPooling3D, BatchNormalization, Flatten, Dense, Dropout
+
+def create_simple_model():
+    # input_shape = (SEQUENCE_LENGTH, IMAGE_HEIGHT, IMAGE_WIDTH, 3)
+    model = Sequential()
+
+    # Layer 1 & 2 (Conv + BN = 6 weights)
+    model.add(Conv3D(32, kernel_size=(3, 3, 3), activation='relu', 
+                     input_shape=(SEQUENCE_LENGTH, IMAGE_HEIGHT, IMAGE_WIDTH, 3)))
+    model.add(MaxPooling3D(pool_size=(2, 2, 2)))
+    model.add(BatchNormalization())
+
+    # Layer 3 & 4 (Conv + BN = 6 weights)
+    model.add(Conv3D(64, kernel_size=(3, 3, 3), activation='relu'))
+    model.add(MaxPooling3D(pool_size=(2, 2, 2)))
+    model.add(BatchNormalization())
+
+    model.add(Flatten())
+
+    # Layer 5 (Dense = 2 weights)
+    model.add(Dense(128, activation='relu'))
+    model.add(Dropout(0.5))
+
+    # Layer 6 (Dense = 2 weights)
+    model.add(Dense(len(CLASSES_LIST), activation='softmax'))
+
+    return model
+
 @st.cache_resource
-def load_model_weights():
+def load_model_weights(path, model_type):
     try:
-        # 1. Build the empty structure
-        model = create_model()
+        if model_type == "cnn":
+            print("cnn")# simple model with 16 weights
+            model = create_simple_model()
+        elif model_type == "lstm":  # LSTM model with 262 weights
+            model = create_model()
+        else:
+            raise ValueError("Unknown model_type")
         
-        # 2. Load Raw Weights manually (The Magic Fix)
-        # This bypasses Keras version conflicts completely
-        with np.load(MODEL_PATH) as data:
-            # Reconstruct the list of weights in correct order (arr_0, arr_1, ...)
-            weight_list = [data[f'arr_{i}'] for i in range(len(data.files))]
-            
-        # Inject weights into the model
-        model.set_weights(weight_list)
-        print("✅ Weights injected successfully from NPZ.")
+        with np.load(path) as data:
+            weights = [data[f'arr_{i}'] for i in range(len(data.files))]
+        
+        if len(weights) != len(model.get_weights()):
+            raise ValueError(f"Weight count mismatch: {len(weights)} vs {len(model.get_weights())}")
+        
+        model.set_weights(weights)
         return model
+
 
     except Exception as e:
         st.error(f"Error loading raw weights: {e}")
@@ -93,7 +127,8 @@ st.title("🏋️ AI Sports Action Recognition")
 st.write("Upload a video to classify the action.")
 
 # Load model
-model = load_model_weights()
+model = load_model_weights(MODEL_PATH, "lstm")
+model_2 = load_model_weights(MODEL_PATH_2, "cnn")
 
 uploaded_file = st.file_uploader("Choose a video file...", type=["mp4", "avi", "mov", "mkv"])
 
@@ -105,27 +140,68 @@ if uploaded_file is not None:
     st.video(uploaded_file)
     
     if st.button("🚀 Analyze Action"):
-        if model is None:
-            st.error("Model not loaded properly.")
+        if model is None or model_2 is None:
+            st.error("One or both models failed to load.")
         else:
             with st.spinner('Analyzing...'):
                 try:
                     video_input = process_video(video_path)
-                    prediction = model.predict(video_input)
-                    
-                    class_index = np.argmax(prediction)
-                    confidence = np.max(prediction) * 100
-                    predicted_class_name = CLASSES_LIST[class_index]
-                    
+
+                    # Run both models
+                    pred1 = model.predict(video_input, verbose=0)[0]
+                    pred2 = model_2.predict(video_input, verbose=0)[0]
+
+                    idx1, idx2 = np.argmax(pred1), np.argmax(pred2)
+                    conf1, conf2 = pred1[idx1] * 100, pred2[idx2] * 100
+
+                    class1 = CLASSES_LIST[idx1]
+                    class2 = CLASSES_LIST[idx2]
+
                     st.divider()
-                    if confidence < 40:
-                        st.warning(f"⚠️ Low Confidence ({confidence:.1f}%).")
-                        st.write(f"Prediction: **{predicted_class_name}**")
+                    st.subheader("🔍 Model Comparison")
+
+                    col1, col2 = st.columns(2)
+
+                    # =========================
+                    # Model 1
+                    # =========================
+                    with col1:
+                        st.markdown("### 🧠 Model 1 (LSTM)")
+                        st.write(f"**Prediction:** {class1}")
+
+                        if conf1 < 40:
+                            st.warning(f"Low Confidence ({conf1:.1f}%)")
+                        else:
+                            st.progress(int(conf1))
+                            st.caption(f"Confidence: {conf1:.2f}%")
+
+                    # =========================
+                    # Model 2
+                    # =========================
+                    with col2:
+                        st.markdown("### 🤖 Model 2 (CNN)")
+                        st.write(f"**Prediction:** {class2}")
+
+                        if conf2 < 40:
+                            st.warning(f"Low Confidence ({conf2:.1f}%)")
+                        else:
+                            st.progress(int(conf2))
+                            st.caption(f"Confidence: {conf2:.2f}%")
+
+                    # =========================
+                    # Agreement Check
+                    # =========================
+                    st.divider()
+                    if class1 == class2:
+                        st.success(f"✅ Both models agree on **{class1}**")
                     else:
-                        st.success(f"### Result: {predicted_class_name}")
-                        st.progress(int(confidence))
-                        st.caption(f"Confidence: {confidence:.2f}%")
-                        
+                        st.info(
+                            f"⚠️ Models disagree:\n\n"
+                            f"- Model 1 → **{class1}**\n"
+                            f"- Model 2 → **{class2}**"
+                        )
+
                 except Exception as e:
-                    st.error(f"Error: {e}")
+                    st.error(f"Error during analysis: {e}")
+
     tfile.close()
